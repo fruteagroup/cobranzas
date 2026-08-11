@@ -299,6 +299,7 @@ tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
       <button class="tab on" data-tab="cc">Cuenta corriente</button>
       <button class="tab" data-tab="cob">Cobranza / Pendientes <span class="badge" id="cobBadge"></span></button>
       <button class="tab" data-tab="arr">Arribos <span class="badge" id="arrBadge" style="background:var(--blue)"></span></button>
+      <button class="tab" data-tab="liq">Liquidaciones <span class="badge" id="liqBadge"></span></button>
     </div>
 
     <!-- ===== TAB CUENTA CORRIENTE ===== -->
@@ -390,6 +391,29 @@ tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
       </div>
       <div id="arrList" class="arr-list"></div>
     </div>
+
+    <!-- ===== TAB LIQUIDACIONES ===== -->
+    <div id="tabLiq" class="hidden">
+      <div class="kpis" id="liqKpis"></div>
+      <div class="filters">
+        <div class="seg" id="liqView">
+          <button data-v="pend" class="on">Pendientes</button>
+          <button data-v="liq">Liquidadas</button>
+          <button data-v="todos">Todas</button>
+        </div>
+        <select id="liqCliente"><option value="">Todos los clientes</option></select>
+        <select id="liqEspecie"><option value="">Todas las especies</option></select>
+        <input type="text" id="liqSearch" placeholder="Buscar planilla, nave, contenedor…">
+        <button class="clr" id="liqClear">Limpiar</button>
+        <span class="count-note" id="liqCount"></span>
+      </div>
+      <div class="legend-note" style="margin:-2px 0 12px">
+        <span><b>Liquidación</b> = si la liquidación ya fue ingresada en el sistema. <span style="color:var(--warning)">Pendiente</span> = falta ingresarla.</span>
+      </div>
+      <div class="twrap">
+        <table id="liqTbl"><thead><tr id="liqHead"></tr></thead><tbody id="liqBody"></tbody><tfoot><tr id="liqFoot"></tr></tfoot></table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -432,6 +456,7 @@ const SALDO_TOL = 5; // tolerancia: saldos con |valor| hasta esto se consideran 
 let RAW=[], CHECK={}, USER="", SB=null, snapMeta=null;
 let sortKey="total_pend", sortDir=-1, barsMode="pend", curTab="cc", estadoView="abiertos";
 let cobSort="total", cobDir=-1, cobExpanded=new Set(), arrView="prox";
+let liqView="pend", liqSort="cliente", liqDir=1;
 const SHIP_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18l1.5-5.5a2 2 0 0 1 1.9-1.5h11.2a2 2 0 0 1 1.9 1.5L21 18"/><path d="M12 4v6"/><path d="M8 7h8"/><path d="M2 20c1 .8 2 .8 3 0s2-.8 3 0 2 .8 3 0 2-.8 3 0 2 .8 3 0"/></svg>';
 const PORT_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 22V8M5 12H2a10 10 0 0 0 20 0h-3M8 12h8"/></svg>';
 
@@ -468,7 +493,7 @@ function reduceRows(rows){
       nave:String(pick(r,["NOMBRE_NAVE","NAV_DES"])??"—").trim().replace(/\s+/g," "), contenedor:pick(r,["CONTENEDOR"])??"",
       mercado:pick(r,["NOM_MER","Mercado"])??"—",
       terms:pick(r,["DESC_FPAGO"])??"—", liquidacion:pick(r,["LIQUIDACION?","LIQUIDACION"])??"",
-      eta:null, etd:null, factura:0, fob:0, cajas:0, monto_ant:0, ant_pagado:0, saldo:0, cobro_ant:false, _espCajas:{}, _dusSi:false, _dusNo:false, _pack:{}});
+      eta:null, etd:null, factura:0, fob:0, cajas:0, monto_ant:0, ant_pagado:0, saldo:0, cobro_ant:false, _espCajas:{}, _dusSi:false, _dusNo:false, _liqSi:false, _liqNo:false, _pack:{}});
     const o=map.get(key);
     o.factura+=num(pick(r,["TOTAL_US"])); o.fob+=num(pick(r,["FOB"])); o.cajas+=num(pick(r,["CAJAS"]));
     o.monto_ant+=num(pick(r,["MONTO_ANT"]));       // anticipo a pagar (calculado)
@@ -484,14 +509,16 @@ function reduceRows(rows){
     if(!o._pack[pkey]) o._pack[pkey]={prod:String(pProd),vari:String(pVar),cal:(pCal==null?"—":String(pCal)),cat:String(pCat),cajas:0};
     o._pack[pkey].cajas+=cj;
     const dl=pick(r,["DUS_LEGALIZADO","Dus Legalizado"]); if(dl!=null){ const v=String(dl).trim().toLowerCase(); if(v==="no")o._dusNo=true; else if(v==="si"||v==="sí")o._dusSi=true; }
+    const lq=pick(r,["LIQUIDACION?","LIQUIDACION"]); if(lq!=null){ const v=String(lq).trim().toUpperCase(); if(v==="NO")o._liqNo=true; else if(v==="SI"||v==="SÍ")o._liqSi=true; }
     if(pick(r,["FECHA_COBRO_ANT"])) o.cobro_ant=true;
   }
   const out=[...map.values()];
   out.forEach(o=>{ const ec=o._espCajas||{}; o.especies=Object.keys(ec).sort();
     o.especie=o.especies.length?Object.entries(ec).sort((a,b)=>b[1]-a[1])[0][0]:"—";
     o.dus_auto = o._dusSi && !o._dusNo;
+    o.liq_si = (o._liqSi||o._liqNo) ? (o._liqSi && !o._liqNo) : null;   // liquidada solo si todas las líneas dicen SI
     o.packing = Object.values(o._pack||{});
-    delete o._espCajas; delete o._dusSi; delete o._dusNo; delete o._pack; });
+    delete o._espCajas; delete o._dusSi; delete o._dusNo; delete o._liqSi; delete o._liqNo; delete o._pack; });
   return out;
 }
 function deriveMetrics(arr){
@@ -502,6 +529,7 @@ function deriveMetrics(arr){
     o.factura=Math.round(o.factura*100)/100; o.fob=Math.round(o.fob*100)/100;
     o.saldo=Math.round(o.saldo*100)/100;
     o.liquidado = Math.abs(o.fob)>0.5;
+    if(o.liq_si==null) o.liq_si = o.liquidado;   // sin dato de columna LIQUIDACION → usar FOB
     // Pendiente de pago (con tolerancia SALDO_TOL para absorber diferencias de decimales):
     const antp = o.liquidado ? 0 : (o.monto_ant - o.ant_pagado);   // anticipos (no liquidadas)
     o.ant_pend   = antp>SALDO_TOL ? antp : 0;
@@ -574,9 +602,12 @@ function showDashboard(){ $("#emptyState").classList.add("hidden"); $("#dash").c
 function buildFilterOptions(){ const fill=(id,vals)=>{ const sel=$(id); const cur=sel.value; sel.querySelectorAll("option:not(:first-child)").forEach(o=>o.remove());
     [...new Set(vals)].filter(v=>v&&v!=="—").sort().forEach(v=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o); }); sel.value=cur; };
   fill("#fCliente",RAW.map(r=>r.cliente)); fill("#fExp",RAW.map(r=>r.exportadora)); fill("#fEspecie",RAW.flatMap(r=>r.especies||[])); fill("#cobEspecie",RAW.flatMap(r=>r.especies||[]));
-  fill("#arrCliente",RAW.map(r=>r.cliente)); fill("#arrEspecie",RAW.flatMap(r=>r.especies||[])); fill("#arrMercado",RAW.map(r=>r.mercado)); fill("#arrExp",RAW.map(r=>r.exportadora)); }
-function renderAll(){ render(); renderCobranza(); renderArribos(); const deudores=cobRows().length; $("#cobBadge").textContent=deudores?deudores:"";
-  const t=arrToday(); const proxN=voyages(RAW.filter(r=>r.eta&&r.eta>=t)).length; $("#arrBadge").textContent=proxN?proxN:""; }
+  fill("#arrCliente",RAW.map(r=>r.cliente)); fill("#arrEspecie",RAW.flatMap(r=>r.especies||[])); fill("#arrMercado",RAW.map(r=>r.mercado)); fill("#arrExp",RAW.map(r=>r.exportadora));
+  fill("#liqCliente",RAW.map(r=>r.cliente)); fill("#liqEspecie",RAW.flatMap(r=>r.especies||[])); }
+function renderAll(){ render(); renderCobranza(); renderArribos(); renderLiquidaciones();
+  const deudores=cobRows().length; $("#cobBadge").textContent=deudores?deudores:"";
+  const t=arrToday(); const proxN=voyages(RAW.filter(r=>r.eta&&r.eta>=t)).length; $("#arrBadge").textContent=proxN?proxN:"";
+  const pendLiq=RAW.filter(r=>!r.liq_si).length; $("#liqBadge").textContent=pendLiq?pendLiq:""; }
 
 /* ===== TAB CUENTA CORRIENTE ===== */
 function getFiltered(){ const cli=$("#fCliente").value,exp=$("#fExp").value,espe=$("#fEspecie").value,est=$("#fEstado").value,q=$("#fSearch").value.trim().toLowerCase();
@@ -823,11 +854,48 @@ function openPacking(planilla){
   $("#packModal").classList.remove("hidden");
 }
 
+/* ===== TAB LIQUIDACIONES ===== */
+const LIQCOLS=[{k:"cliente",t:"Cliente Final",cls:"cliente-cell"},{k:"planilla",t:"Planilla"},{k:"especie",t:"Especie",type:"especie"},
+  {k:"contenedor",t:"Contenedor"},{k:"nave",t:"Nave"},{k:"cajas",t:"Cajas",type:"num"},{k:"liq_si",t:"Liquidación",type:"estadoliq"}];
+function liqFiltered(){
+  const cli=$("#liqCliente").value,esp=$("#liqEspecie").value,q=$("#liqSearch").value.trim().toLowerCase();
+  return RAW.filter(r=>{
+    if(liqView==="pend" && r.liq_si) return false;
+    if(liqView==="liq" && !r.liq_si) return false;
+    if(cli&&r.cliente!==cli) return false; if(esp&&!(r.especies||[]).includes(esp)) return false;
+    if(q){ const h=(r.planilla+" "+r.nave+" "+r.contenedor+" "+r.cliente).toLowerCase(); if(!h.includes(q)) return false; }
+    return true;
+  });
+}
+function renderLiquidaciones(){
+  const nPend=RAW.filter(r=>!r.liq_si).length, nLiq=RAW.filter(r=>r.liq_si).length;
+  const cajasPend=RAW.filter(r=>!r.liq_si).reduce((a,r)=>a+(r.cajas||0),0);
+  const K=[{lab:"Pendientes de liquidación",val:nPend,sub:"operaciones sin liquidar",cls:"warn"},
+    {lab:"Cajas por liquidar",val:fmt0(cajasPend),sub:"en operaciones pendientes"},
+    {lab:"Liquidadas",val:nLiq,sub:"ya ingresadas",cls:"favor"},
+    {lab:"Total operaciones",val:RAW.length,sub:"en la base"}];
+  $("#liqKpis").innerHTML=K.map(x=>`<div class="tile ${x.cls||''}"><div class="lab">${x.lab}</div><div class="val">${x.val}</div><div class="sub">${x.sub}</div></div>`).join("");
+  const data=liqFiltered();
+  data.sort((a,b)=>{ let x=a[liqSort],y=b[liqSort]; if(liqSort==="cajas"||liqSort==="liq_si"){ x=liqSort==="cajas"?(a.cajas||0):(a.liq_si?1:0); y=liqSort==="cajas"?(b.cajas||0):(b.liq_si?1:0); return liqDir*(x-y); } return liqDir*String(x||"").localeCompare(String(y||"")); });
+  $("#liqCount").textContent=`${data.length} operaciones`;
+  $("#liqHead").innerHTML=LIQCOLS.map(c=>{ const isNum=c.type==="num",s=liqSort===c.k;
+    return `<th data-k="${c.k}" class="${isNum?'num':''} ${s?'sorted':''}">${c.t} <span class="ar">${s?(liqDir>0?"▲":"▼"):"↕"}</span></th>`; }).join("");
+  $("#liqHead").querySelectorAll("th").forEach(th=>{ th.onclick=()=>{ const k=th.dataset.k; if(liqSort===k)liqDir*=-1; else{liqSort=k;liqDir=(k==="cajas")?-1:1;} renderLiquidaciones(); }; });
+  $("#liqBody").innerHTML=data.length?data.map(r=>LIQCOLS.map(col=>{
+    if(col.type==="num") return `<td class="num">${fmt0(r.cajas)}</td>`;
+    if(col.type==="especie"){ const a=r.especies||[],ex=a.length>1?` <span style="color:var(--muted);font-size:11px">+${a.length-1}</span>`:""; return `<td title="${a.join(', ')}">${r.especie||"—"}${ex}</td>`; }
+    if(col.type==="estadoliq") return r.liq_si?`<td><span class="pill pagado">● Liquidada</span></td>`:`<td><span class="pill pend">● Pendiente</span></td>`;
+    return `<td class="${col.cls||''}">${r[col.k]??"—"}</td>`;
+  }).join("")).map(row=>`<tr>${row}</tr>`).join(""):`<tr><td colspan="7" style="padding:20px;color:var(--muted)">No hay operaciones en esta vista.</td></tr>`;
+  const totCajas=data.reduce((a,r)=>a+(r.cajas||0),0);
+  $("#liqFoot").innerHTML=`<td>TOTAL (${data.length})</td><td></td><td></td><td></td><td></td><td class="num">${fmt0(totCajas)}</td><td></td>`;
+}
+
 /* ===== Nombre / tabs / eventos ===== */
 function askName(){ $("#nameInput").value=USER||""; $("#nameModal").classList.remove("hidden"); setTimeout(()=>$("#nameInput").focus(),50); }
 function saveName(){ const v=$("#nameInput").value.trim(); if(!v){ $("#nameInput").focus(); return; } USER=v; lsSet("cc_user",v); $("#nameModal").classList.add("hidden"); setStatus($("#statusPill").classList.contains("on")); }
-function switchTab(t){ curTab=t; $("#tabCC").classList.toggle("hidden",t!=="cc"); $("#tabCob").classList.toggle("hidden",t!=="cob"); $("#tabArr").classList.toggle("hidden",t!=="arr");
-  document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===t)); if(t==="cob") renderCobranza(); if(t==="arr") renderArribos(); }
+function switchTab(t){ curTab=t; $("#tabCC").classList.toggle("hidden",t!=="cc"); $("#tabCob").classList.toggle("hidden",t!=="cob"); $("#tabArr").classList.toggle("hidden",t!=="arr"); $("#tabLiq").classList.toggle("hidden",t!=="liq");
+  document.querySelectorAll(".tab").forEach(b=>b.classList.toggle("on",b.dataset.tab===t)); if(t==="cob") renderCobranza(); if(t==="arr") renderArribos(); if(t==="liq") renderLiquidaciones(); }
 
 $("#loadBaseBtn").onclick=$("#loadBaseBtn2").onclick=()=>$("#baseFile").click();
 $("#baseFile").onchange=e=>{ if(e.target.files[0]) handleFile(e.target.files[0]); e.target.value=""; };
@@ -839,6 +907,9 @@ $("#cobEspecie").onchange=renderCobranza; $("#cobSearch").oninput=renderCobranza
 ["#arrCliente","#arrEspecie","#arrMercado","#arrExp"].forEach(id=>$(id).onchange=renderArribos); $("#arrSearch").oninput=renderArribos;
 $("#arrClear").onclick=()=>{ ["#arrCliente","#arrEspecie","#arrMercado","#arrExp"].forEach(id=>$(id).value=""); $("#arrSearch").value=""; renderArribos(); };
 $("#arrView").querySelectorAll("button").forEach(b=>b.onclick=()=>{ arrView=b.dataset.v; $("#arrView").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); renderArribos(); });
+["#liqCliente","#liqEspecie"].forEach(id=>$(id).onchange=renderLiquidaciones); $("#liqSearch").oninput=renderLiquidaciones;
+$("#liqClear").onclick=()=>{ ["#liqCliente","#liqEspecie"].forEach(id=>$(id).value=""); $("#liqSearch").value=""; renderLiquidaciones(); };
+$("#liqView").querySelectorAll("button").forEach(b=>b.onclick=()=>{ liqView=b.dataset.v; $("#liqView").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); renderLiquidaciones(); });
 $("#themeBtn").onclick=()=>{ const r=document.documentElement; r.dataset.theme=r.dataset.theme==="dark"?"light":"dark"; };
 $("#barsToggle").querySelectorAll("button").forEach(b=>b.onclick=()=>{ barsMode=b.dataset.m; $("#barsToggle").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); renderClientBars(getFiltered()); });
 $("#fView").querySelectorAll("button").forEach(b=>b.onclick=()=>{ estadoView=b.dataset.v; $("#fView").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b)); render(); });
