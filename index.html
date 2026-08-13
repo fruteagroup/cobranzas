@@ -156,6 +156,7 @@ tbody tr:hover{background:var(--surface-2)}
 :root[data-theme="dark"] .pill.pend{color:var(--warning)}
 .pill.venc{background:color-mix(in srgb,var(--critical) 18%,transparent);color:var(--critical)}
 .pill.favor{background:color-mix(in srgb,var(--favor) 15%,transparent);color:var(--good-text)}
+.pill.plazo{background:color-mix(in srgb,var(--blue) 15%,transparent);color:var(--blue)}
 .pill.noliq{background:color-mix(in srgb,var(--muted) 20%,transparent);color:var(--ink-2)}
 .saldo-pos{color:var(--critical);font-weight:600} .saldo-neg{color:var(--favor);font-weight:600} .saldo-zero{color:var(--muted)}
 .cliente-cell{font-weight:600}
@@ -320,7 +321,7 @@ tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
         <div class="panel">
           <h3>Antigüedad del pendiente</h3>
           <div class="aging" id="agingBox"></div>
-          <div class="legend-note"><span>Días desde la <b>ETA</b> para operaciones con pago pendiente.</span></div>
+          <div class="legend-note"><span><b>Días de atraso</b> = desde el vencimiento del saldo (ETA + plazo de la condición de pago).</span></div>
         </div>
       </div>
 
@@ -337,6 +338,7 @@ tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
           <option value="">Todo estado</option>
           <option value="pend">Con pago pendiente</option>
           <option value="venc">Vencidas</option>
+          <option value="plazo">Dentro de plazo</option>
           <option value="noliq">Sin liquidar</option>
           <option value="pagado">Pagadas</option>
           <option value="favor">Saldo a favor</option>
@@ -476,6 +478,18 @@ function parseDate(v){ // robusto: Date, serial de Excel, ISO, o texto DD-MM-YYY
   if(m){ let dd=+m[1],mm=+m[2],yy=+m[3]; if(yy<100)yy+=2000; if(mm>12&&dd<=12){const t=dd;dd=mm;mm=t;} const d=new Date(yy,mm-1,dd); if(!isNaN(d)) return d; }
   const d=new Date(s); return isNaN(d)?null:d;
 }
+// Días de plazo del saldo tras el arribo, leídos de la condición de pago (DESC_FPAGO).
+// Devuelve nº de días, o null si la condición no tiene plazo reconocible (consignación/anticipo/cobranza).
+function parseTermDays(cond){
+  if(cond==null) return null;
+  const t=String(cond).toUpperCase();
+  if(/CONTRA\s+(OC|DOCUMENTOS?)/.test(t)) return 0;      // exigible al presentar OC/documentos ~ arribo
+  let m=t.match(/(\d+)\s*D[IÍ]AS/);                       // "25 DIAS", "30 DIAS DESPUES DEL ARRIBO"
+  if(m) return parseInt(m[1],10);
+  m=t.match(/-\s*(\d+)\s*$/);                             // "A 100% - 0"
+  if(m) return parseInt(m[1],10);
+  return null;                                            // consignación / solo anticipo / cobranza → sin plazo
+}
 function lsGet(k){ try{return localStorage.getItem(k);}catch(e){return null;} }
 function lsSet(k,v){ try{localStorage.setItem(k,v);}catch(e){} }
 function cssEsc(s){ return String(s).replace(/["\\]/g,"\\$&"); }
@@ -536,14 +550,18 @@ function deriveMetrics(arr){
     o.saldo_pend = (o.liquidado && o.saldo>SALDO_TOL) ? o.saldo : 0;   // saldos (liquidadas)
     o.a_favor    = (o.liquidado && o.saldo<-SALDO_TOL) ? -o.saldo : 0;
     o.total_pend = o.ant_pend + o.saldo_pend;
+    // Vencimiento del saldo = ETA + días de plazo (según condición de pago)
+    o.credit_days = parseTermDays(o.terms);
+    o.due = (o.eta && o.credit_days!=null) ? new Date(o.eta.getTime()+o.credit_days*86400000) : null;
     // Estado
-    if(!o.liquidado) o.estado="noliq";
-    else if(o.saldo>SALDO_TOL) o.estado="pend";
-    else if(o.saldo<-SALDO_TOL) o.estado="favor";
-    else o.estado="pagado";
-    // Aging
-    o.dias=0; if(o.total_pend>0 && o.eta) o.dias=Math.round((today-o.eta)/86400000);
-    o.vencida=o.total_pend>0 && o.dias>0;
+    if(!o.liquidado) o.estado="noliq";                       // sin liquidar
+    else if(o.saldo < -SALDO_TOL) o.estado="favor";          // sobrepago
+    else if(o.saldo <= SALDO_TOL) o.estado="pagado";         // saldado
+    else if(o.due) o.estado = (today > o.due) ? "vencido" : "plazo";  // con saldo y plazo definido
+    else o.estado="pendiente";                               // con saldo pero sin plazo reconocible
+    o.vencida = o.estado==="vencido";
+    // Aging = días pasados del vencimiento (solo si vencido)
+    o.dias = (o.vencida && o.due) ? Math.round((today-o.due)/86400000) : 0;
   }
   return arr;
 }
@@ -617,6 +635,7 @@ function getFiltered(){ const cli=$("#fCliente").value,exp=$("#fExp").value,espe
     if(estadoView==="cerrados" && !cerrado) return false;
     if(cli&&r.cliente!==cli) return false; if(exp&&r.exportadora!==exp) return false; if(espe&&!(r.especies||[]).includes(espe)) return false;
     if(est==="pend"&&!(r.total_pend>0.5)) return false; if(est==="venc"&&!r.vencida) return false;
+    if(est==="plazo"&&r.estado!=="plazo") return false;
     if(est==="noliq"&&r.liquidado) return false; if(est==="pagado"&&r.estado!=="pagado") return false; if(est==="favor"&&r.estado!=="favor") return false;
     if(q){ const h=(r.planilla+" "+r.nave+" "+r.contenedor+" "+r.cliente+" "+r.consignee).toLowerCase(); if(!h.includes(q)) return false; }
     return true; }); }
@@ -664,7 +683,7 @@ const COLS=[{k:"cliente",t:"Cliente",cls:"cliente-cell"},{k:"planilla",t:"Planil
   {k:"fob",t:"FOB / Liquidado",type:"fob"},{k:"ant_pagado",t:"Pagado",type:"usd"},{k:"total_pend",t:"Pendiente",type:"pend"},
   {k:"estado",t:"Estado",type:"estado"},{k:"check",t:"Checklist equipo",type:"check"}];
 const CHK_DEFS=[{k:"pl",label:"Packing list enviado"},{k:"docs",label:"Documentos enviados"},{k:"dus",label:"DUS legalizado (automático)",auto:true}];
-const ESTADOS={noliq:{c:"noliq",t:"Sin liquidar"},pend:{c:"pend",t:"Pendiente"},pagado:{c:"pagado",t:"Pagado"},favor:{c:"favor",t:"A favor"}};
+const ESTADOS={noliq:{c:"noliq",t:"Sin liquidar"},vencido:{c:"venc",t:"Vencida"},plazo:{c:"plazo",t:"Dentro de plazo"},pendiente:{c:"pend",t:"Pendiente"},pagado:{c:"pagado",t:"Pagado"},favor:{c:"favor",t:"A favor"}};
 function renderTable(data){
   $("#headRow").innerHTML=COLS.map(c=>{ const isNum=["usd","pend","fob"].includes(c.type),s=sortKey===c.k;
     const ar=c.k==="check"?"":`<span class="ar">${s?(sortDir>0?"▲":"▼"):"↕"}</span>`;
@@ -679,7 +698,7 @@ function renderTable(data){
       if(col.type==="fob") return r.liquidado?`<td class="num"><span class="liq-ok">✓ ${fmtUSD(r.fob)}</span></td>`:`<td class="num"><span class="liq-no">Sin liquidar</span></td>`;
       if(col.type==="pend"){ const v=r.total_pend; if(v>0.5) return `<td class="num"><span class="saldo-pos" title="${r.ant_pend>0?'Anticipo pendiente':'Saldo pendiente'}">${fmtUSD(v)}</span></td>`;
         if(r.a_favor>0.5) return `<td class="num"><span class="saldo-neg" title="Saldo a favor">${fmtUSD(-r.a_favor)}</span></td>`; return `<td class="num"><span class="saldo-zero">—</span></td>`; }
-      if(col.type==="estado"){ const e=ESTADOS[r.estado]; const lab=r.vencida?{c:"venc",t:"Vencida"}:e; return `<td><span class="pill ${lab.c}">● ${lab.t}</span></td>`; }
+      if(col.type==="estado"){ const e=ESTADOS[r.estado]||{c:"pend",t:r.estado}; const extra=(r.estado==="vencido"&&r.dias>0)?` <span style="font-size:10px;opacity:.8">+${r.dias}d</span>`:""; return `<td><span class="pill ${e.c}" title="${r.due?'Vence: '+fmtDate(r.due):'Sin plazo definido'}">● ${e.t}</span>${extra}</td>`; }
       if(col.type==="check") return `<td><div class="chk-group">${CHK_DEFS.map(d=>{
         if(d.auto){ const on=!!r.dus_auto; return `<span class="chk auto ${on?'on':''}" data-chk="dus"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg><span class="tip">${d.label}: ${on?'Sí':'No'}</span></span>`; }
         const on=!!c[d.k]; return `<span class="chk ${on?'on':''}" data-plan="${r.planilla}" data-chk="${d.k}"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg><span class="tip">${d.label}</span></span>`; }).join("")}</div></td>`;
