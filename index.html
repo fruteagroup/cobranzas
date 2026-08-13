@@ -367,7 +367,7 @@ tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
         <span class="count-note" id="cobCount"></span>
       </div>
       <div class="legend-note" style="margin:-2px 0 12px">
-        <span>Deuda por cliente = <b style="color:var(--warning)">anticipos pendientes</b> (operaciones sin liquidar) + <b style="color:var(--critical)">saldos de liquidación pendientes</b>. Clic en un cliente para ver el detalle y generar el mensaje de recordatorio.</span>
+        <span><b style="color:var(--critical)">Por cobrar (vencido)</b> = saldos ya vencidos + anticipos pendientes → exigibles ahora. <b style="color:var(--blue)">Por vencer</b> = saldos aún dentro de plazo (no se cobran todavía). El mensaje de recordatorio solo reclama lo vencido; lo por vencer va como referencia.</span>
       </div>
       <div class="twrap">
         <table id="cobTbl"><thead><tr id="cobHead"></tr></thead><tbody id="cobBody"></tbody><tfoot><tr id="cobFoot"></tr></tfoot></table>
@@ -457,7 +457,7 @@ const SALDO_TOL = 5; // tolerancia: saldos con |valor| hasta esto se consideran 
 
 let RAW=[], CHECK={}, USER="", SB=null, snapMeta=null;
 let sortKey="total_pend", sortDir=-1, barsMode="pend", curTab="cc", estadoView="abiertos";
-let cobSort="total", cobDir=-1, cobExpanded=new Set(), arrView="prox";
+let cobSort="exig", cobDir=-1, cobExpanded=new Set(), arrView="prox";
 let liqView="pend", liqSort="cliente", liqDir=1;
 const SHIP_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18l1.5-5.5a2 2 0 0 1 1.9-1.5h11.2a2 2 0 0 1 1.9 1.5L21 18"/><path d="M12 4v6"/><path d="M8 7h8"/><path d="M2 20c1 .8 2 .8 3 0s2-.8 3 0 2 .8 3 0 2-.8 3 0 2 .8 3 0"/></svg>';
 const PORT_SVG='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 22V8M5 12H2a10 10 0 0 0 20 0h-3M8 12h8"/></svg>';
@@ -623,7 +623,7 @@ function buildFilterOptions(){ const fill=(id,vals)=>{ const sel=$(id); const cu
   fill("#arrCliente",RAW.map(r=>r.cliente)); fill("#arrEspecie",RAW.flatMap(r=>r.especies||[])); fill("#arrMercado",RAW.map(r=>r.mercado)); fill("#arrExp",RAW.map(r=>r.exportadora));
   fill("#liqCliente",RAW.map(r=>r.cliente)); fill("#liqEspecie",RAW.flatMap(r=>r.especies||[])); }
 function renderAll(){ render(); renderCobranza(); renderArribos(); renderLiquidaciones();
-  const deudores=cobRows().length; $("#cobBadge").textContent=deudores?deudores:"";
+  const nCob=cobRows().filter(c=>c.exig>0.5).length; $("#cobBadge").textContent=nCob?nCob:"";
   const t=arrToday(); const proxN=voyages(RAW.filter(r=>r.eta&&r.eta>=t)).length; $("#arrBadge").textContent=proxN?proxN:"";
   const pendLiq=RAW.filter(r=>!r.liq_si).length; $("#liqBadge").textContent=pendLiq?pendLiq:""; }
 
@@ -678,8 +678,8 @@ function renderAging(data){
     {nm:"61 – 90 días",t:r=>r.vencida&&r.dias>60&&r.dias<=90,c:"var(--critical)"},{nm:"Más de 90 días",t:r=>r.vencida&&r.dias>90,c:"var(--critical)"}];
   $("#agingBox").innerHTML=B.map(b=>{ const rs=data.filter(b.t),mo=rs.reduce((a,r)=>a+r.total_pend,0);
     return `<div class="age-row"><span class="ic" style="background:${b.c}"></span><span class="nm">${b.nm}</span><span class="meta"><b>${fmtUSD(mo)}</b><span>${rs.length} oper.</span></span></div>`; }).join(""); }
-const COLS=[{k:"cliente",t:"Cliente",cls:"cliente-cell"},{k:"planilla",t:"Planilla"},{k:"especie",t:"Especie",type:"especie"},
-  {k:"eta",t:"ETA",type:"date"},{k:"terms",t:"Condición pago"},{k:"factura",t:"Factura US$",type:"usd"},
+const COLS=[{k:"cliente",t:"Cliente",cls:"cliente-cell"},{k:"especie",t:"Especie",type:"especie"},{k:"planilla",t:"Planilla"},
+  {k:"contenedor",t:"Contenedor"},{k:"eta",t:"ETA",type:"date"},{k:"factura",t:"Factura US$",type:"usd"},
   {k:"fob",t:"FOB / Liquidado",type:"fob"},{k:"ant_pagado",t:"Pagado",type:"usd"},{k:"total_pend",t:"Pendiente",type:"pend"},
   {k:"estado",t:"Estado",type:"estado"},{k:"check",t:"Checklist equipo",type:"check"}];
 const CHK_DEFS=[{k:"pl",label:"Packing list enviado"},{k:"docs",label:"Documentos enviados"},{k:"dus",label:"DUS legalizado (automático)",auto:true}];
@@ -713,28 +713,33 @@ function renderTable(data){
     return `<td></td>`; }).join(""); }
 
 /* ===== TAB COBRANZA ===== */
-function cobRows(){ // por cliente con deuda>0, respetando filtro de especie/buscador
+function cobRows(){ // por cliente: separa lo EXIGIBLE (vencido/anticipo) de lo que aún está POR VENCER
   const espe=$("#cobEspecie")?$("#cobEspecie").value:"", q=$("#cobSearch")?$("#cobSearch").value.trim().toLowerCase():"";
   const m={};
-  RAW.forEach(r=>{ if(espe&&!(r.especies||[]).includes(espe)) return; if(r.total_pend<=0.5) return;
-    if(!m[r.cliente]) m[r.cliente]={cliente:r.cliente,ant:0,saldo:0,total:0,ops:[]};
-    const o=m[r.cliente]; o.ant+=r.ant_pend; o.saldo+=r.saldo_pend; o.total+=r.total_pend; o.ops.push(r); });
+  RAW.forEach(r=>{ if(espe&&!(r.especies||[]).includes(espe)) return;
+    let exig=0,porv=0,cat=null;
+    if(r.ant_pend>0.5){ exig=r.ant_pend; cat='anticipo'; }
+    else if(r.saldo_pend>0.5){ if(r.estado==='plazo'){ porv=r.saldo_pend; cat='plazo'; } else if(r.estado==='vencido'){ exig=r.saldo_pend; cat='vencido'; } else { exig=r.saldo_pend; cat='sinplazo'; } }
+    else return;
+    if(!m[r.cliente]) m[r.cliente]={cliente:r.cliente,exig:0,porv:0,total:0,ops:[]};
+    const o=m[r.cliente]; o.exig+=exig; o.porv+=porv; o.total+=exig+porv; o.ops.push({...r,_exig:exig,_porv:porv,_cat:cat}); });
   let arr=Object.values(m);
   if(q) arr=arr.filter(c=>c.cliente.toLowerCase().includes(q));
   arr.sort((a,b)=>{ let x=a[cobSort],y=b[cobSort]; if(cobSort==="ops"){x=a.ops.length;y=b.ops.length;} if(typeof x==="string") return cobDir*x.localeCompare(y); return cobDir*((x||0)-(y||0)); });
   return arr;
 }
-const COBCOLS=[{k:"cliente",t:"Cliente"},{k:"ops",t:"Ops.",type:"count"},{k:"ant",t:"Anticipos pend.",type:"usd"},{k:"saldo",t:"Saldos pend.",type:"usd"},{k:"total",t:"Total pendiente",type:"usd"},{k:"acc",t:"",type:"acc"}];
+const COBCOLS=[{k:"cliente",t:"Cliente"},{k:"ops",t:"Ops.",type:"count"},{k:"exig",t:"Por cobrar (vencido)",type:"usd"},{k:"porv",t:"Por vencer",type:"usd"},{k:"total",t:"Total",type:"usd"},{k:"acc",t:"",type:"acc"}];
+const CATLBL={anticipo:'<span style="color:#b7791a">Anticipo</span>',vencido:'<span style="color:var(--critical)">Saldo vencido</span>',sinplazo:'<span style="color:var(--ink-2)">Saldo (sin plazo)</span>',plazo:'<span style="color:var(--blue)">Por vencer</span>'};
 function renderCobKpis(rows){
-  const tAnt=rows.reduce((a,c)=>a+c.ant,0),tSal=rows.reduce((a,c)=>a+c.saldo,0),tTot=rows.reduce((a,c)=>a+c.total,0);
-  const t=[{lab:"Clientes con deuda",val:rows.length,sub:"con pago pendiente"},
-    {lab:"Anticipos pendientes",val:fmtUSD(tAnt),sub:"operaciones sin liquidar",cls:"warn"},
-    {lab:"Saldos pendientes",val:fmtUSD(tSal),sub:"operaciones liquidadas",cls:"crit"},
-    {lab:"Total por cobrar",val:fmtUSD(tTot),sub:"suma de la deuda de clientes",cls:"accent"}];
+  const tExig=rows.reduce((a,c)=>a+c.exig,0),tPorv=rows.reduce((a,c)=>a+c.porv,0),tTot=rows.reduce((a,c)=>a+c.total,0),nCob=rows.filter(c=>c.exig>0.5).length;
+  const t=[{lab:"Por cobrar ahora",val:fmtUSD(tExig),sub:"vencido / exigible",cls:"crit"},
+    {lab:"Por vencer",val:fmtUSD(tPorv),sub:"aún dentro de plazo",cls:"accent"},
+    {lab:"Clientes a cobrar",val:nCob,sub:"con monto exigible"},
+    {lab:"Total pendiente",val:fmtUSD(tTot),sub:"exigible + por vencer"}];
   $("#cobKpis").innerHTML=t.map(x=>`<div class="tile ${x.cls||''}"><div class="lab">${x.lab}</div><div class="val">${x.val}</div><div class="sub">${x.sub}</div></div>`).join(""); }
 function renderCobranza(){
   const rows=cobRows(); renderCobKpis(rows);
-  $("#cobCount").textContent=`${rows.length} clientes con deuda`;
+  $("#cobCount").textContent=`${rows.length} clientes · ${rows.filter(c=>c.exig>0.5).length} con vencido`;
   $("#cobHead").innerHTML=COBCOLS.map(c=>{ const isNum=c.type==="usd"||c.type==="count",s=cobSort===c.k;
     const ar=c.type==="acc"?"":`<span class="ar">${s?(cobDir>0?"▲":"▼"):"↕"}</span>`;
     return `<th data-k="${c.k}" class="${isNum?'num':''} ${s?'sorted':''}">${c.t} ${ar}</th>`; }).join("");
@@ -743,34 +748,45 @@ function renderCobranza(){
     const main=`<tr data-cli="${c.cliente}" class="cob-main">
       <td class="cliente-cell">${c.cliente}</td>
       <td class="num">${c.ops.length}</td>
-      <td class="num">${c.ant>0.5?`<span style="color:#b7791a">${fmtUSD(c.ant)}</span>`:'—'}</td>
-      <td class="num">${c.saldo>0.5?`<span class="saldo-pos">${fmtUSD(c.saldo)}</span>`:'—'}</td>
+      <td class="num">${c.exig>0.5?`<span class="saldo-pos">${fmtUSD(c.exig)}</span>`:'—'}</td>
+      <td class="num">${c.porv>0.5?`<span style="color:var(--blue)">${fmtUSD(c.porv)}</span>`:'—'}</td>
       <td class="num"><b>${fmtUSD(c.total)}</b></td>
       <td class="num" style="white-space:nowrap"><button class="mini-btn" data-ver="${c.cliente}">${cobExpanded.has(c.cliente)?'Ocultar':'Ver'}</button> <button class="mini-btn msg" data-msg="${c.cliente}">Mensaje</button></td></tr>`;
     let det="";
     if(cobExpanded.has(c.cliente)){
-      const ops=[...c.ops].sort((a,b)=>b.total_pend-a.total_pend);
-      det=`<tr class="cob-detail"><td colspan="6"><div class="inner"><table><thead><tr><th>Planilla</th><th>Especie</th><th>ETA</th><th>Cond. pago</th><th style="text-align:right">Factura</th><th>Tipo</th><th style="text-align:right">Pendiente</th><th style="text-align:right">Días</th></tr></thead><tbody>${
-        ops.map(o=>`<tr><td>${o.planilla}</td><td>${o.especie}</td><td>${fmtDate(o.eta)}</td><td>${o.terms}</td><td style="text-align:right;font-variant-numeric:tabular-nums">${fmtUSD(o.factura)}</td><td>${o.ant_pend>0.5?'<span style="color:#b7791a">Anticipo</span>':'<span style="color:var(--critical)">Saldo</span>'}</td><td style="text-align:right;font-variant-numeric:tabular-nums" class="saldo-pos">${fmtUSD(o.total_pend)}</td><td style="text-align:right">${o.dias>0?o.dias:'—'}</td></tr>`).join("")
+      const ops=[...c.ops].sort((a,b)=>(b._exig-a._exig)||(b._porv-a._porv));
+      det=`<tr class="cob-detail"><td colspan="6"><div class="inner"><table><thead><tr><th>Planilla</th><th>Especie</th><th>ETA</th><th>Vence</th><th>Tipo</th><th style="text-align:right">Monto</th><th style="text-align:right">Atraso</th></tr></thead><tbody>${
+        ops.map(o=>`<tr><td>${o.planilla}</td><td>${o.especie}</td><td>${fmtDate(o.eta)}</td><td>${o.due?fmtDate(o.due):'—'}</td><td>${CATLBL[o._cat]||o._cat}</td><td style="text-align:right;font-variant-numeric:tabular-nums" class="${o._exig>0?'saldo-pos':''}">${fmtUSD(o._exig||o._porv)}</td><td style="text-align:right">${o._cat==='vencido'&&o.dias>0?o.dias+' d':'—'}</td></tr>`).join("")
       }</tbody></table></div></td></tr>`;
     }
     return main+det; }).join("")||`<tr><td colspan="6" style="padding:20px;color:var(--muted)">Ningún cliente con pago pendiente en la selección. 🎉</td></tr>`;
   $("#cobBody").querySelectorAll("[data-ver]").forEach(b=>b.onclick=()=>{ const cl=b.dataset.ver; if(cobExpanded.has(cl))cobExpanded.delete(cl); else cobExpanded.add(cl); renderCobranza(); });
   $("#cobBody").querySelectorAll("[data-msg]").forEach(b=>b.onclick=()=>openMessage(b.dataset.msg));
   const tot=k=>rows.reduce((a,c)=>a+(c[k]||0),0);
-  $("#cobFoot").innerHTML=`<td>TOTAL (${rows.length})</td><td class="num">${rows.reduce((a,c)=>a+c.ops.length,0)}</td><td class="num">${fmtUSD(tot('ant'))}</td><td class="num">${fmtUSD(tot('saldo'))}</td><td class="num"><b>${fmtUSD(tot('total'))}</b></td><td></td>`;
+  $("#cobFoot").innerHTML=`<td>TOTAL (${rows.length})</td><td class="num">${rows.reduce((a,c)=>a+c.ops.length,0)}</td><td class="num">${fmtUSD(tot('exig'))}</td><td class="num">${fmtUSD(tot('porv'))}</td><td class="num"><b>${fmtUSD(tot('total'))}</b></td><td></td>`;
 }
 function openMessage(cliente){
   const rows=cobRows(); const c=rows.find(x=>x.cliente===cliente); if(!c) return;
-  const ops=[...c.ops].sort((a,b)=>(a.eta?a.eta.getTime():0)-(b.eta?b.eta.getTime():0));
-  const anticipos=ops.filter(o=>o.ant_pend>0.5), saldos=ops.filter(o=>o.saldo_pend>0.5);
+  const hoy=fmtDate(new Date());
+  const vencidos=c.ops.filter(o=>o._cat==='vencido').sort((a,b)=>b.dias-a.dias);
+  const anticipos=c.ops.filter(o=>o._cat==='anticipo');
+  const sinplazo=c.ops.filter(o=>o._cat==='sinplazo');
+  const porvencer=c.ops.filter(o=>o._cat==='plazo').sort((a,b)=>(a.due?a.due:0)-(b.due?b.due:0));
   const L=[]; L.push(`Estimados ${cliente},`); L.push("");
-  L.push(`Junto con saludar, les recordamos los montos pendientes de pago con ${EMPRESA} al ${fmtDate(new Date())}:`); L.push("");
-  if(anticipos.length){ L.push("ANTICIPOS PENDIENTES (operaciones sin liquidar):");
-    anticipos.forEach(o=>L.push(`  • ${o.planilla} — ${o.especie}, ETA ${fmtDate(o.eta)}: ${fmtUSD(o.ant_pend)}`)); L.push(`  Subtotal anticipos: ${fmtUSD(c.ant)}`); L.push(""); }
-  if(saldos.length){ L.push("SALDOS DE LIQUIDACIÓN PENDIENTES:");
-    saldos.forEach(o=>L.push(`  • ${o.planilla} — ${o.especie}, ETA ${fmtDate(o.eta)}: ${fmtUSD(o.saldo_pend)}`)); L.push(`  Subtotal saldos: ${fmtUSD(c.saldo)}`); L.push(""); }
-  L.push(`TOTAL PENDIENTE: ${fmtUSD(c.total)}`); L.push("");
+  if(c.exig>0.5){
+    L.push(`Junto con saludar, les recordamos los montos vencidos / por cobrar con ${EMPRESA} al ${hoy}:`); L.push("");
+    if(vencidos.length){ L.push("SALDOS VENCIDOS:");
+      vencidos.forEach(o=>L.push(`  • ${o.planilla} — ${o.especie}, venció ${fmtDate(o.due)} (${o.dias} días de atraso): ${fmtUSD(o._exig)}`)); L.push(""); }
+    if(anticipos.length){ L.push("ANTICIPOS PENDIENTES:");
+      anticipos.forEach(o=>L.push(`  • ${o.planilla} — ${o.especie}, ETA ${fmtDate(o.eta)}: ${fmtUSD(o._exig)}`)); L.push(""); }
+    if(sinplazo.length){ L.push("SALDOS PENDIENTES:");
+      sinplazo.forEach(o=>L.push(`  • ${o.planilla} — ${o.especie}: ${fmtUSD(o._exig)}`)); L.push(""); }
+    L.push(`TOTAL A PAGAR: ${fmtUSD(c.exig)}`); L.push("");
+  } else {
+    L.push(`Junto con saludar, a la fecha (${hoy}) no registran montos vencidos con ${EMPRESA}. ¡Gracias por su puntualidad!`); L.push("");
+  }
+  if(porvencer.length){ L.push("Próximos vencimientos (referencial, aún dentro de plazo):");
+    porvencer.forEach(o=>L.push(`  • ${o.planilla} — ${o.especie}, vence ${fmtDate(o.due)}: ${fmtUSD(o._porv)}`)); L.push(""); }
   L.push("Agradeceremos su gestión y quedamos atentos a cualquier consulta."); L.push("");
   L.push("Saludos cordiales,"); L.push(`${USER||""}`.trim()?`${USER} — ${EMPRESA}`:EMPRESA);
   $("#msgTitle").textContent="Recordatorio · "+cliente; $("#msgText").value=L.join("\n"); $("#msgModal").classList.remove("hidden");
@@ -778,9 +794,9 @@ function openMessage(cliente){
 
 /* ===== Export Excel ===== */
 function exportExcel(){
-  if(curTab==="cob"){ const rows=cobRows(); const out=[];
-    rows.forEach(c=>c.ops.forEach(o=>out.push({Cliente:c.cliente,Planilla:o.planilla,Especie:(o.especies||[]).join(', '),ETA:fmtDate(o.eta),
-      "Condicion pago":o.terms,"Factura US$":Math.round(o.factura),Tipo:o.ant_pend>0.5?"Anticipo":"Saldo","Pendiente US$":Math.round(o.total_pend),"Dias":o.dias})));
+  if(curTab==="cob"){ const rows=cobRows(); const out=[]; const CT={anticipo:"Anticipo",vencido:"Saldo vencido",sinplazo:"Saldo sin plazo",plazo:"Por vencer"};
+    rows.forEach(c=>c.ops.forEach(o=>out.push({Cliente:c.cliente,Planilla:o.planilla,Especie:(o.especies||[]).join(', '),ETA:fmtDate(o.eta),Vence:o.due?fmtDate(o.due):"",
+      "Condicion pago":o.terms,Tipo:CT[o._cat]||o._cat,"Por cobrar US$":Math.round(o._exig||0),"Por vencer US$":Math.round(o._porv||0),"Dias atraso":o._cat==='vencido'?o.dias:""})));
     const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Cobranza"); XLSX.writeFile(wb,"cobranza_"+new Date().toISOString().slice(0,10)+".xlsx"); toast("Excel de cobranza exportado."); return; }
   const data=getFiltered();
   const rows=data.map(r=>{ const c=CHECK[r.planilla]||{}; return {Cliente:r.cliente,Planilla:r.planilla,Especie:(r.especies||[]).join(', '),Exportadora:r.exportadora,Pais:r.pais,Nave:r.nave,ETA:fmtDate(r.eta),
