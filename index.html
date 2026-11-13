@@ -137,6 +137,9 @@ header.top{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bo
 
 .filters{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .filters select,.filters input{font-family:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.seasonbar{margin-left:auto;display:flex;align-items:center;gap:7px}
+.seasonbar label{font-size:11px;font-weight:700;color:var(--ink-2);text-transform:uppercase;letter-spacing:.04em}
+.season-sel{font-family:inherit;font-size:13px;font-weight:700;padding:6px 12px;border:1.5px solid var(--blue);border-radius:8px;background:var(--surface);color:var(--ink);box-shadow:var(--shadow);cursor:pointer}
 .filters input{min-width:180px}
 .filters .clr{color:var(--blue);background:transparent;border:none;box-shadow:none;font-weight:550;font-size:12.5px}
 .count-note{font-size:12px;color:var(--muted);margin-left:auto}
@@ -296,11 +299,15 @@ tfoot td.num{text-align:right;font-variant-numeric:tabular-nums}
   </div>
 
   <div id="dash" class="hidden">
-    <div class="tabs">
+    <div class="tabs" style="align-items:center">
       <button class="tab on" data-tab="cc">Cuenta corriente</button>
       <button class="tab" data-tab="cob">Cobranza / Pendientes <span class="badge" id="cobBadge"></span></button>
       <button class="tab" data-tab="arr">Arribos <span class="badge" id="arrBadge" style="background:var(--blue)"></span></button>
       <button class="tab" data-tab="liq">Liquidaciones <span class="badge" id="liqBadge"></span></button>
+      <div class="seasonbar">
+        <label for="fSeason">Temporada</label>
+        <select id="fSeason" class="season-sel" title="Filtra todas las pestañas por temporada"><option value="">Todas</option></select>
+      </div>
     </div>
 
     <!-- ===== TAB CUENTA CORRIENTE ===== -->
@@ -456,6 +463,7 @@ const EMPRESA = "Frutea Group";
 const SALDO_TOL = 5; // tolerancia: saldos con |valor| hasta esto se consideran saldados ($0). Absorbe diferencias de decimales / redondeo.
 
 let RAW=[], CHECK={}, USER="", SB=null, snapMeta=null;
+let SEASON="", seasonInit=false;   // temporada activa ("" = todas); filtro global de todas las pestañas
 let sortKey="total_pend", sortDir=-1, barsMode="pend", curTab="cc", estadoView="abiertos";
 let cobSort="exig", cobDir=-1, cobExpanded=new Set(), arrView="prox";
 let liqView="pend", liqSort="cliente", liqDir=1;
@@ -490,6 +498,24 @@ function parseTermDays(cond){
   if(m) return parseInt(m[1],10);
   return null;                                            // consignación / solo anticipo / cobranza → sin plazo
 }
+// Temporada: normaliza "TEMPORADA 25-26" / "25-26" / "2526" → "25-26"
+function cleanTemp(v){
+  if(v==null||v==="") return "";
+  const s=String(v).trim();
+  let m=s.match(/(\d{2})\s*[-/]\s*(\d{2})/);              // "25-26", "25/26", "TEMPORADA 25-26"
+  if(m) return m[1]+"-"+m[2];
+  m=s.match(/(\d{2})(\d{2})(?!\d)/);                      // "2526"
+  if(m) return m[1]+"-"+m[2];
+  return s;
+}
+// Deriva la temporada desde el código de planilla (ej. "DO2526_001" → "25-26")
+function tempFromPlanilla(p){
+  if(p==null) return "";
+  const m=String(p).match(/[A-Za-z]*?(\d{2})(\d{2})/);
+  return m ? m[1]+"-"+m[2] : "";
+}
+// Filas de la base ya acotadas a la temporada activa (filtro global)
+function baseRows(){ return SEASON ? RAW.filter(r=>r.temporada===SEASON) : RAW; }
 function lsGet(k){ try{return localStorage.getItem(k);}catch(e){return null;} }
 function lsSet(k,v){ try{localStorage.setItem(k,v);}catch(e){} }
 function cssEsc(s){ return String(s).replace(/["\\]/g,"\\$&"); }
@@ -504,6 +530,7 @@ function reduceRows(rows){
     if(!map.has(key)) map.set(key,{planilla:key,
       cliente:pick(r,["CLIENTE_FINAL","Cliente Final"])??"—", exportadora:pick(r,["Exportadora","EXPORTADORA"])??"—",
       pais:pick(r,["NOM_PAIS","Pais"])??"—", consignee:pick(r,["NOM_CONSIGNEE"])??"—",
+      temporada:cleanTemp(pick(r,["NOM_TEM","COD_TEM","Temporada","TEMPORADA"])),
       nave:String(pick(r,["NOMBRE_NAVE","NAV_DES"])??"—").trim().replace(/\s+/g," "), contenedor:pick(r,["CONTENEDOR"])??"",
       mercado:pick(r,["NOM_MER","Mercado"])??"—",
       terms:pick(r,["DESC_FPAGO"])??"—", liquidacion:pick(r,["LIQUIDACION?","LIQUIDACION"])??"",
@@ -538,6 +565,7 @@ function reduceRows(rows){
 function deriveMetrics(arr){
   const today=new Date(); today.setHours(0,0,0,0);
   for(const o of arr){
+    o.temporada = cleanTemp(o.temporada) || tempFromPlanilla(o.planilla);   // asegura temporada (incl. snapshots antiguos)
     if(o.eta && !(o.eta instanceof Date)) o.eta=parseDate(o.eta);
     if(o.etd && !(o.etd instanceof Date)) o.etd=parseDate(o.etd);
     o.factura=Math.round(o.factura*100)/100; o.fob=Math.round(o.fob*100)/100;
@@ -617,19 +645,28 @@ function setStatus(on){ const p=$("#statusPill"); p.classList.toggle("on",on); p
   $("#statusTxt").innerHTML = on?`En línea · <b>${USER||"—"}</b>`:"Sin conexión"; }
 function showDashboard(){ $("#emptyState").classList.add("hidden"); $("#dash").classList.remove("hidden");
   $("#subtitle").innerHTML = snapMeta?`Base: <b>${snapMeta.file_name||"—"}</b> · subida por ${snapMeta.uploaded_by||"—"} · ${fmtDate(snapMeta.uploaded_at)} · ${RAW.length} operaciones`:""; buildFilterOptions(); }
-function buildFilterOptions(){ const fill=(id,vals)=>{ const sel=$(id); const cur=sel.value; sel.querySelectorAll("option:not(:first-child)").forEach(o=>o.remove());
+function buildSeasonOptions(){
+  const seasons=[...new Set(RAW.map(r=>r.temporada).filter(Boolean))].sort();   // "25-26" < "26-27"
+  const sel=$("#fSeason"); if(!sel) return;
+  sel.querySelectorAll("option:not(:first-child)").forEach(o=>o.remove());
+  seasons.forEach(v=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o); });
+  if(!seasonInit){ SEASON = seasons.length ? seasons[seasons.length-1] : ""; seasonInit=true; }   // por defecto: temporada más reciente
+  else if(SEASON && !seasons.includes(SEASON)) SEASON = "";                                        // la temporada activa ya no existe
+  sel.value = SEASON;
+}
+function buildFilterOptions(){ buildSeasonOptions(); const B=baseRows(); const fill=(id,vals)=>{ const sel=$(id); const cur=sel.value; sel.querySelectorAll("option:not(:first-child)").forEach(o=>o.remove());
     [...new Set(vals)].filter(v=>v&&v!=="—").sort().forEach(v=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; sel.appendChild(o); }); sel.value=cur; };
-  fill("#fCliente",RAW.map(r=>r.cliente)); fill("#fExp",RAW.map(r=>r.exportadora)); fill("#fEspecie",RAW.flatMap(r=>r.especies||[])); fill("#cobEspecie",RAW.flatMap(r=>r.especies||[]));
-  fill("#arrCliente",RAW.map(r=>r.cliente)); fill("#arrEspecie",RAW.flatMap(r=>r.especies||[])); fill("#arrMercado",RAW.map(r=>r.mercado)); fill("#arrExp",RAW.map(r=>r.exportadora));
-  fill("#liqCliente",RAW.map(r=>r.cliente)); fill("#liqEspecie",RAW.flatMap(r=>r.especies||[])); }
+  fill("#fCliente",B.map(r=>r.cliente)); fill("#fExp",B.map(r=>r.exportadora)); fill("#fEspecie",B.flatMap(r=>r.especies||[])); fill("#cobEspecie",B.flatMap(r=>r.especies||[]));
+  fill("#arrCliente",B.map(r=>r.cliente)); fill("#arrEspecie",B.flatMap(r=>r.especies||[])); fill("#arrMercado",B.map(r=>r.mercado)); fill("#arrExp",B.map(r=>r.exportadora));
+  fill("#liqCliente",B.map(r=>r.cliente)); fill("#liqEspecie",B.flatMap(r=>r.especies||[])); }
 function renderAll(){ render(); renderCobranza(); renderArribos(); renderLiquidaciones();
   const nCob=cobRows().filter(c=>c.exig>0.5).length; $("#cobBadge").textContent=nCob?nCob:"";
-  const t=arrToday(); const proxN=voyages(RAW.filter(r=>r.eta&&r.eta>=t)).length; $("#arrBadge").textContent=proxN?proxN:"";
-  const pendLiq=RAW.filter(r=>!r.liq_si).length; $("#liqBadge").textContent=pendLiq?pendLiq:""; }
+  const t=arrToday(); const proxN=voyages(baseRows().filter(r=>r.eta&&r.eta>=t)).length; $("#arrBadge").textContent=proxN?proxN:"";
+  const pendLiq=baseRows().filter(r=>!r.liq_si).length; $("#liqBadge").textContent=pendLiq?pendLiq:""; }
 
 /* ===== TAB CUENTA CORRIENTE ===== */
 function getFiltered(){ const cli=$("#fCliente").value,exp=$("#fExp").value,espe=$("#fEspecie").value,est=$("#fEstado").value,q=$("#fSearch").value.trim().toLowerCase();
-  return RAW.filter(r=>{
+  return baseRows().filter(r=>{
     const cerrado = r.liquidado && r.total_pend<=0.5;   // liquidado, pagado, pendiente $0 (incluye a favor)
     if(estadoView==="abiertos" && cerrado) return false;
     if(estadoView==="cerrados" && !cerrado) return false;
@@ -642,7 +679,7 @@ function getFiltered(){ const cli=$("#fCliente").value,exp=$("#fExp").value,espe
 function sumBy(d,f){ return d.reduce((a,r)=>a+f(r),0); }
 function render(){ const data=getFiltered(); renderKPIs(data); renderClientBars(data); renderAging(data); renderTable(data);
   const et={abiertos:"pendientes",cerrados:"cerradas",todos:""}[estadoView];
-  $("#countNote").textContent=`${data.length.toLocaleString("es-CL")} ${et?'operaciones '+et:'operaciones'} de ${RAW.length.toLocaleString("es-CL")}`; }
+  $("#countNote").textContent=`${data.length.toLocaleString("es-CL")} ${et?'operaciones '+et:'operaciones'} de ${baseRows().length.toLocaleString("es-CL")}`; }
 function renderKPIs(data){
   const facturado=sumBy(data,r=>r.factura), pendTotal=sumBy(data,r=>r.total_pend), saldoPend=sumBy(data,r=>r.saldo_pend),
     antPend=sumBy(data,r=>r.ant_pend), aFavor=sumBy(data,r=>r.a_favor), vencido=sumBy(data,r=>r.vencida?r.total_pend:0),
@@ -716,7 +753,7 @@ function renderTable(data){
 function cobRows(){ // por cliente: separa lo EXIGIBLE (vencido/anticipo) de lo que aún está POR VENCER
   const espe=$("#cobEspecie")?$("#cobEspecie").value:"", q=$("#cobSearch")?$("#cobSearch").value.trim().toLowerCase():"";
   const m={};
-  RAW.forEach(r=>{ if(espe&&!(r.especies||[]).includes(espe)) return;
+  baseRows().forEach(r=>{ if(espe&&!(r.especies||[]).includes(espe)) return;
     let exig=0,porv=0,cat=null;
     if(r.ant_pend>0.5){ exig=r.ant_pend; cat='anticipo'; }
     else if(r.saldo_pend>0.5){ if(r.estado==='plazo'){ porv=r.saldo_pend; cat='plazo'; } else if(r.estado==='vencido'){ exig=r.saldo_pend; cat='vencido'; } else { exig=r.saldo_pend; cat='sinplazo'; } }
@@ -795,11 +832,11 @@ function openMessage(cliente){
 /* ===== Export Excel ===== */
 function exportExcel(){
   if(curTab==="cob"){ const rows=cobRows(); const out=[]; const CT={anticipo:"Anticipo",vencido:"Saldo vencido",sinplazo:"Saldo sin plazo",plazo:"Por vencer"};
-    rows.forEach(c=>c.ops.forEach(o=>out.push({Cliente:c.cliente,Planilla:o.planilla,Especie:(o.especies||[]).join(', '),ETA:fmtDate(o.eta),Vence:o.due?fmtDate(o.due):"",
+    rows.forEach(c=>c.ops.forEach(o=>out.push({Temporada:o.temporada||"",Cliente:c.cliente,Planilla:o.planilla,Especie:(o.especies||[]).join(', '),ETA:fmtDate(o.eta),Vence:o.due?fmtDate(o.due):"",
       "Condicion pago":o.terms,Tipo:CT[o._cat]||o._cat,"Por cobrar US$":Math.round(o._exig||0),"Por vencer US$":Math.round(o._porv||0),"Dias atraso":o._cat==='vencido'?o.dias:""})));
     const ws=XLSX.utils.json_to_sheet(out),wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Cobranza"); XLSX.writeFile(wb,"cobranza_"+new Date().toISOString().slice(0,10)+".xlsx"); toast("Excel de cobranza exportado."); return; }
   const data=getFiltered();
-  const rows=data.map(r=>{ const c=CHECK[r.planilla]||{}; return {Cliente:r.cliente,Planilla:r.planilla,Especie:(r.especies||[]).join(', '),Exportadora:r.exportadora,Pais:r.pais,Nave:r.nave,ETA:fmtDate(r.eta),
+  const rows=data.map(r=>{ const c=CHECK[r.planilla]||{}; return {Temporada:r.temporada||"",Cliente:r.cliente,Planilla:r.planilla,Especie:(r.especies||[]).join(', '),Exportadora:r.exportadora,Pais:r.pais,Nave:r.nave,ETA:fmtDate(r.eta),
     "Condicion pago":r.terms,Liquidado:r.liquidado?"Sí":"No","Factura US$":Math.round(r.factura),"FOB US$":Math.round(r.fob),"Pagado US$":Math.round(r.ant_pagado),
     "Anticipo pend US$":Math.round(r.ant_pend),"Saldo pend US$":Math.round(r.saldo_pend),"Total pend US$":Math.round(r.total_pend),"Saldo a favor US$":Math.round(r.a_favor),
     "Dias":r.dias,Estado:ESTADOS[r.estado].t,"PL":c.pl?"Sí":"","Docs":c.docs?"Sí":"","DUS":r.dus_auto?"Sí":"No"}; });
@@ -820,7 +857,7 @@ function arrPos(dias,horizon){ if(dias<=0) return 0.98; return Math.max(0.04, Ma
 function arrFiltered(){
   const cli=$("#arrCliente").value,esp=$("#arrEspecie").value,mer=$("#arrMercado").value,exp=$("#arrExp").value,q=$("#arrSearch").value.trim().toLowerCase();
   const today=arrToday();
-  return RAW.filter(r=>{
+  return baseRows().filter(r=>{
     if(!r.eta) return false;
     const arribado = r.eta<today;
     if(arrView==="prox" && arribado) return false;
@@ -840,7 +877,7 @@ function voyages(list){ // agrupa embarques por nave + ETA (un viaje)
 }
 function renderArribos(){
   const today=arrToday();
-  const allV=voyages(RAW.filter(r=>r.eta));
+  const allV=voyages(baseRows().filter(r=>r.eta));
   const cnt=f=>allV.filter(f).length;
   const inTransit=g=>{const s=arrStatus(g,today);return s&&s.k==="transito";};
   const K=[{lab:"Arribos próximos 7 días",val:cnt(g=>g.eta>=today&&(g.eta-today)/86400000<=7),sub:"naves esta semana",cls:"accent"},
@@ -894,7 +931,7 @@ const LIQCOLS=[{k:"cliente",t:"Cliente Final",cls:"cliente-cell"},{k:"planilla",
   {k:"contenedor",t:"Contenedor"},{k:"nave",t:"Nave"},{k:"cajas",t:"Cajas",type:"num"},{k:"liq_si",t:"Liquidación",type:"estadoliq"}];
 function liqFiltered(){
   const cli=$("#liqCliente").value,esp=$("#liqEspecie").value,q=$("#liqSearch").value.trim().toLowerCase();
-  return RAW.filter(r=>{
+  return baseRows().filter(r=>{
     if(liqView==="pend" && r.liq_si) return false;
     if(liqView==="liq" && !r.liq_si) return false;
     if(cli&&r.cliente!==cli) return false; if(esp&&!(r.especies||[]).includes(esp)) return false;
@@ -903,12 +940,13 @@ function liqFiltered(){
   });
 }
 function renderLiquidaciones(){
-  const nPend=RAW.filter(r=>!r.liq_si).length, nLiq=RAW.filter(r=>r.liq_si).length;
-  const cajasPend=RAW.filter(r=>!r.liq_si).reduce((a,r)=>a+(r.cajas||0),0);
+  const B=baseRows();
+  const nPend=B.filter(r=>!r.liq_si).length, nLiq=B.filter(r=>r.liq_si).length;
+  const cajasPend=B.filter(r=>!r.liq_si).reduce((a,r)=>a+(r.cajas||0),0);
   const K=[{lab:"Pendientes de liquidación",val:nPend,sub:"operaciones sin liquidar",cls:"warn"},
     {lab:"Cajas por liquidar",val:fmt0(cajasPend),sub:"en operaciones pendientes"},
     {lab:"Liquidadas",val:nLiq,sub:"ya ingresadas",cls:"favor"},
-    {lab:"Total operaciones",val:RAW.length,sub:"en la base"}];
+    {lab:"Total operaciones",val:B.length,sub:"en la base"}];
   $("#liqKpis").innerHTML=K.map(x=>`<div class="tile ${x.cls||''}"><div class="lab">${x.lab}</div><div class="val">${x.val}</div><div class="sub">${x.sub}</div></div>`).join("");
   const data=liqFiltered();
   data.sort((a,b)=>{ let x=a[liqSort],y=b[liqSort]; if(liqSort==="cajas"||liqSort==="liq_si"){ x=liqSort==="cajas"?(a.cajas||0):(a.liq_si?1:0); y=liqSort==="cajas"?(b.cajas||0):(b.liq_si?1:0); return liqDir*(x-y); } return liqDir*String(x||"").localeCompare(String(y||"")); });
@@ -937,6 +975,7 @@ $("#baseFile").onchange=e=>{ if(e.target.files[0]) handleFile(e.target.files[0])
 $("#exportBtn").onclick=exportExcel;
 ["#fCliente","#fExp","#fEspecie","#fEstado"].forEach(id=>$(id).onchange=render);
 $("#fSearch").oninput=render;
+$("#fSeason").onchange=()=>{ SEASON=$("#fSeason").value; buildFilterOptions(); renderAll(); };
 $("#clearF").onclick=()=>{ ["#fCliente","#fExp","#fEspecie","#fEstado"].forEach(id=>$(id).value=""); $("#fSearch").value=""; render(); };
 $("#cobEspecie").onchange=renderCobranza; $("#cobSearch").oninput=renderCobranza;
 ["#arrCliente","#arrEspecie","#arrMercado","#arrExp"].forEach(id=>$(id).onchange=renderArribos); $("#arrSearch").oninput=renderArribos;
